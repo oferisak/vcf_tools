@@ -1,0 +1,185 @@
+---
+title: "analyze_happy_output"
+author: "Ofer Isakov"
+date: '2023-01-26'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+vcf_analysis_folder<-'/media/SSD/Bioinformatics/Projects/vcf_parser_2023/'
+project_dir<-vcf_analysis_folder
+knitr::opts_knit$set(root.dir=project_dir)
+knitr::opts_chunk$set(echo = F)
+library(ProjectTemplate)
+setwd(project_dir)
+load.project()
+```
+
+```{r read_data}
+regions_of_interest<-c('xgen-exome-research-panel-v2-targets-hg19')
+files_to_compare<-read_delim('./data/happy_comparisons/comparison_sheet.csv')
+join_by_cols<-c('ChromKey','POS','gt_GT_alleles')
+
+comp_vcf_all<-NULL
+for (i in 1:nrow(files_to_compare)){
+  original_vcf_name<-files_to_compare%>%slice(i)%>%pull(original_vcf)
+  message(glue('parsing {original_vcf_name}..'))
+  happy_vcf_name<-files_to_compare%>%slice(i)%>%pull(happy_vcf)
+  
+  original_vcf<-read.vcfR(original_vcf_name)
+  happy_vcf_in_roi<-filter_happy_vcf_by_region(happy_vcf_name,regions_of_interest)
+  happy_vcf<-read.vcfR(happy_vcf_in_roi)
+  
+  original_vcf_df<-vcf_to_tidy(original_vcf,happy_individual = NA)
+  happy_vcf_df<-vcf_to_tidy(happy_vcf,happy_individual = 'QUERY')
+  
+  comp_vcf<-happy_vcf_df%>%select(all_of(join_by_cols),gt_BD,gt_BVT)%>%
+    left_join(original_vcf_df,by=c('ChromKey','POS','gt_GT_alleles'))
+  
+  comp_vcf_all<-comp_vcf_all%>%bind_rows(comp_vcf)
+}
+
+```
+
+https://rpubs.com/StatsGary/tidymodels_from_scratch
+
+```{r generate_decision_tree}
+library(usemodels)
+library(tidymodels)
+ml_data<-comp_vcf_all%>%
+  filter(gt_BD%in%c('TP','FP'))%>%
+  mutate(gt_BD=factor(gt_BD),
+         gt_AF=as.numeric(gt_AF),
+         gt_DP=as.numeric(gt_DP),
+         gt_GQ=as.numeric(gt_GQ),
+         gt_QD=as.numeric(QD))
+
+features<-c('QUAL','MQ','gt_AF','gt_BVT','gt_DP','gt_GQ','QD','MQRankSum','ReadPosRankSum')
+features<-c('QUAL','MQ','gt_DP')
+
+ml_data%>%count(gt_BD,gt_BVT)
+ml_data%>%group_by(gt_BVT,gt_BD)%>%skimr::skim_without_charts(all_of(features))
+
+ml_data<-ml_data[complete.cases(ml_data%>%select(features)),]
+
+# Partition into training and hold out test / validation sample
+set.seed(123)
+split <- ml_data%>%rsample::initial_split(strata = gt_BD)
+train_data <- rsample::training(split)
+test_data <- rsample::testing(split)
+
+form<-as.formula(glue('gt_BD ~ {paste0(features,collapse="+")}'))
+rec <- 
+  recipe(form, data=train_data)%>%
+  step_smote(gt_BD, over_ratio = 0.3)
+
+tune_tree <- 
+  decision_tree(
+    cost_complexity = tune(), #tune() is a placeholder for an empty grid 
+    tree_depth = tune() #we will fill these in the next section
+  ) %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")         
+
+
+set.seed(123)
+tree_wf <- workflow() %>% 
+  add_model(tune_tree) %>% 
+  add_recipe(rec)
+# Make the decision tree workflow - always postfix with wf for convention
+# Add the registered model
+# Add the formula of the outcome class you are predicting against all IVs
+
+vfold <- vfold_cv(train_data, v=5)
+# grid_tree_tune <- grid_regular(dials::cost_complexity(),
+#                                dials::tree_depth(), 
+#                                levels = 3)
+
+# print(head(grid_tree_tune,20))
+manual_grid<-expand.grid(cost_complexity=c(0.0001,0.001,0.1),tree_depth=c(3,4,5,6,7))
+
+tree_pred_tuned <- 
+  tree_wf %>% 
+  tune::tune_grid(
+    resamples = vfold, #This is the 10 fold cross validation variable we created earlier
+    grid = manual_grid, #This is the tuning grid
+    metrics = yardstick::metric_set(accuracy, roc_auc,mn_log_loss)
+  )
+
+collected_mets <- tune::collect_metrics(tree_pred_tuned)
+best_tree <- tree_pred_tuned %>% 
+  tune::select_best("roc_auc")
+
+final_wf <- 
+  tree_wf %>% 
+  finalize_workflow(best_tree) #Finalise workflow passes in our best tree
+
+print(final_wf)
+
+final_tree_pred <- 
+  final_wf %>% 
+  fit(data = train_data)
+
+print(final_tree_pred)
+tree_fit <- final_tree_pred %>% 
+  extract_fit_parsnip()
+library(rpart.plot)
+rpart.plot(tree_fit$fit,
+           type=1,
+           extra=1)
+
+# Predict on holdout set
+class_pred <- predict(tree_fit, test_data) #Get the class label predictions
+prob_pred <- predict(tree_fit, test_data, type="prob") #Get the probability predictions
+predictions <- data.frame(class_pred, prob_pred) %>% 
+  setNames(c("pred_class", "pred_FP", "pred_TP")) #Combined into tibble and rename
+
+
+get_logical_vector <- function(df, condition) {
+  condition_to_parse<-paste0(paste("df$",condition,sep = ''),collapse='&')
+  print(condition_to_parse)
+  logical_vector <- eval(parse(text = condition_to_parse))
+  return(logical_vector)
+}
+
+test_data_fixed<-test_data[complete.cases(test_data%>%select(QUAL,DP,MQ,gt_AF,gt_GQ)),]
+
+
+bin_preds<-function(input_table,conditions,col_name='bin_pred',default='intermediate'){
+  input_table[,col_name]<-default
+  for (i in 1:length(conditions)){
+    condition_name<-names(conditions[i])
+    condition=conditions[[i]]
+    matching_rows<-get_logical_vector(input_table, condition)
+    input_table[matching_rows,col_name]<-condition_name
+  }
+  return(input_table)
+}
+
+tree_conditions<-list(high=c('QUAL>=20','MQ>50','DP>10'),low=c('QUAL<11','DP<10'))
+#tree_conditions<-list(high=c('gt_GQ>5','MQ>24'),low=c('gt_GQ<=5','QUAL<15'))
+test_data_fixed<-bin_preds(test_data_fixed,col_name='tree_based_preds',tree_conditions)
+
+count_data_tree<-test_data_fixed%>%count(tree_based_preds,gt_BD)
+count_data_tree%>%left_join(count_data_tree%>%group_by(tree_based_preds)%>%summarize(total=sum(n)))%>%
+  mutate(rate=n/total)
+
+base_conditions<-list(high=c('QUAL>=20'),low=c('QUAL<10'))
+test_data_fixed<-bin_preds(test_data_fixed,col_name='base_preds',base_conditions)
+
+count_data_base<-test_data_fixed%>%count(base_preds,gt_BD)
+count_data_base%>%left_join(count_data_base%>%group_by(base_preds)%>%summarize(total=sum(n)))%>%
+  mutate(rate=n/total)
+
+
+
+test_predictions <- test_data %>% 
+  bind_cols(predictions)
+library(caret)
+cm <- caret::confusionMatrix(test_predictions$gt_BD,
+                       test_predictions$pred_class,
+                       positive='TP')
+
+print(cm)
+```
+

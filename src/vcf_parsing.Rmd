@@ -1,0 +1,90 @@
+---
+title: "VCF parser"
+author: "Ofer Isakov"
+date: "11/01/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+vcf_analysis_folder<-'/media/SSD/Bioinformatics/Projects/vcf_parser_2023/'
+project_dir<-vcf_analysis_folder
+knitr::opts_knit$set(root.dir=project_dir)
+knitr::opts_chunk$set(echo = F)
+library(ProjectTemplate)
+setwd(project_dir)
+load.project()
+
+```
+
+```{r read_data}
+library(vcfR)
+library(skimr)
+raw_vcf<-read.vcfR('./data/chr3_test.vcf.gz')
+
+vcf_tidy<-vcfR2tidy(raw_vcf)
+head(vcf_tidy$gt)
+
+gt_df<-vcf_tidy$gt%>%
+  mutate(gq_cat=cut(gt_GQ,breaks=seq(-1,100,10)),
+         gt_AF_fixed=as.numeric(gt_AF),
+         gt_af_cat=cut(gt_AF_fixed,breaks=seq(0,1,0.1)))
+info_df<-vcf_tidy$fix
+
+vcf_df<-gt_df%>%left_join(info_df)
+
+vcf_df$gt_DP
+
+vcf_df%>%
+  slice_sample(n=10000)%>%
+  ggplot(aes(x=gt_GQ,y=QUAL))+
+  geom_point()
+
+
+summary(vcf_df$gq_cat)
+vcf_df%>%group_by(gt_af_cat)%>%skimr::skim_without_charts(QUAL)
+vcf_df%>%ggplot(aes(x=gq_cat,y=QUAL))+
+  geom_boxplot()
+
+
+giab_vcf<-read.vcfR('/media/SSD/Bioinformatics/Projects/sequencing_validation/sequencing_validation_project/data/input_vcfs/giab_202211/21_063_11_22_ds.542dabb562304ee392cb0247cfceddb0/21_063_11_22.hard-filtered.vcf.gz')
+
+
+vcf_df%>%group_by(gq_cat)%>%skimr::skim_without_charts(QUAL)
+giab_df%>%group_by(gq_cat)%>%skimr::skim_without_charts(QUAL)
+```
+
+```{r giab_by_qual}
+giab_vcf_file<-'/media/SSD/Bioinformatics/Projects/sequencing_validation/sequencing_validation_project/data/input_vcfs/giab_202211/21_063_11_22_ds.542dabb562304ee392cb0247cfceddb0/21_063_11_22.hard-filtered.vcf.gz'
+giab_vcf<-read.vcfR(giab_vcf_file)
+giab_tidy<-vcfR2tidy(giab_vcf)
+
+gt_df<-giab_tidy$gt%>%
+  mutate(gq_cat=cut(gt_GQ,breaks=seq(-1,100,10)),
+         gt_AF_fixed=as.numeric(gt_AF),
+         gt_af_cat=cut(gt_AF_fixed,breaks=seq(0,1,0.1)))
+info_df<-giab_tidy$fix%>%
+  mutate(qual_cat=cut(QUAL,breaks=seq(0,70,10)),
+         var_name=glue('{CHROM}\t{POS}\t{REF}\t{ALT}'))
+giab_df<-gt_df%>%left_join(info_df)
+
+levels(giab_df$qual_cat)
+# save to vcf
+headers<-c()
+final_vcf<-list()
+for (vcf_line in readr::read_lines(giab_vcf_file)){
+  #print(vcf_line)
+  if (grepl('^#',vcf_line)){headers<-c(headers,vcf_line)}
+  vcf_line_parts<-stringr::str_split(vcf_line,pattern = '\t')[[1]]
+  vcf_line_var_name
+  for (qual_cat_name in levels(giab_df$qual_cat)){
+    
+    # if (grepl(qual_vars,vcf_line)){
+    #   message(glue('Adding line to {qual_cat_name}'))
+    #   final_vcf[[qual_cat_name]]<-c(final_vcf[[qual_cat_name]],vcf_line)
+    #   }
+  }
+}
+
+
+```
+
