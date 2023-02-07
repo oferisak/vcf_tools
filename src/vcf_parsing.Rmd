@@ -6,7 +6,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-vcf_analysis_folder<-'/media/SSD/Bioinformatics/Projects/vcf_parser_2023/'
+vcf_analysis_folder<-'/media/SSD/Bioinformatics/Projects/vcf_tools_2023/'
 project_dir<-vcf_analysis_folder
 knitr::opts_knit$set(root.dir=project_dir)
 knitr::opts_chunk$set(echo = F)
@@ -17,8 +17,6 @@ load.project()
 ```
 
 ```{r read_data}
-library(vcfR)
-library(skimr)
 raw_vcf<-read.vcfR('./data/chr3_test.vcf.gz')
 
 vcf_tidy<-vcfR2tidy(raw_vcf)

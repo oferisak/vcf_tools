@@ -13,19 +13,37 @@ knitr::opts_chunk$set(echo = F)
 library(ProjectTemplate)
 setwd(project_dir)
 load.project()
+# test
 ```
 
-```{r read_data}
+```{r definitions}
 reference_file<-'/media/SSD/Bioinformatics/Databases/hg19/hg19.fa'
 regions_of_interest<-c()
 #regions_of_interest<-c('xgen-exome-research-panel-v2-targets-hg19')
 comparison_folder<-'./data/happy_comparisons/giab_wgs_for_quality_metrics_norm'
 #comparison_folder<-'./data/happy_comparisons/exomes'
 #comparison_folder<-'./data/happy_comparisons/test_chr3'
+
+comparison_folder_name<-basename(comparison_folder)
+output_folder<-glue('./output/{comparison_folder_name}_results_{Sys.Date()}')
+if (!dir.exists(output_folder)){dir.create(output_folder)}
+
 files_to_compare<-read_delim(glue('{comparison_folder}/comparison_sheet.csv'))
 #join_by_cols<-c('ChromKey','POS','gt_GT_alleles')
 join_by_cols<-c('CHROM','POS','REF','ALT')
+```
 
+If you created the comparison VCF data frame, load it. 
+
+```{r load_comp_df}
+library(arrow)
+all_vcfs_as_tidy_file<-'/media/SSD/Bioinformatics/Projects/vcf_tools_2023/data/happy_comparisons/giab_wgs_for_quality_metrics_norm/all_vcfs_as_tidy.feather'
+comp_vcf_all<-read_feather(all_vcfs_as_tidy_file)
+```
+
+If you havent created the comparison VCF data frame, run the following code.
+
+```{r read_data}
 comp_vcf_all<-NULL
 happy_tidy_vcfs<-list()
 original_tidy_vcfs<-list()
@@ -68,15 +86,15 @@ comp_vcf_all%>%count(gt_BD)
 
 library(arrow)
 write_feather(comp_vcf_all,glue('{comparison_folder}/all_vcfs_as_tidy.feather'))
-
 ```
 
 ```{r plot_metrics_vs_calls}
 features_to_plot<-c('QUAL','MQ','gt_DP','gt_GQ','gt_AF')
 # Plot metrics by SNP/INDEL
-comp_vcf_all%>%
+metrics_vs_vartype<-
+  comp_vcf_all%>%
   mutate(gt_AF=as.numeric(gt_AF))%>%
-  slice_sample(n=100000)%>%
+  slice_sample(n=1000000)%>%
   filter(gt_BD!='UNK')%>%
   select(gt_BVT,gt_BD,gt_BLT,features_to_plot)%>%
   pivot_longer(-c(gt_BD,gt_BVT,gt_BLT))%>%
@@ -87,10 +105,14 @@ comp_vcf_all%>%
   labs(fill='True / False Positive')+
   ggsci::scale_fill_nejm()+
   theme(legend.position = 'top')
-
+metrics_vs_vartype
 # Plot metrics by het/homalt
-comp_vcf_all%>%
-  slice_sample(n=100000)%>%
+ggsave(metrics_vs_vartype,filename = glue('{output_folder}/metrics_vs_vartype_vs_call.{Sys.Date()}.jpg'),device = 'jpg',height=10,width=10,bg = 'white')
+
+metrics_vs_hethom<-
+  comp_vcf_all%>%
+  slice_sample(n=1000000)%>%
+  mutate(gt_AF=as.numeric(gt_AF))%>%
   filter(gt_BD!='UNK')%>%filter(gt_BLT%in%c('het','homalt'))%>%
   select(gt_BVT,gt_BD,gt_BLT,features_to_plot)%>%
   pivot_longer(-c(gt_BD,gt_BVT,gt_BLT))%>%
@@ -101,8 +123,54 @@ comp_vcf_all%>%
   labs(fill='True / False Positive')+
   ggsci::scale_fill_nejm()+
   theme(legend.position = 'top')
+metrics_vs_hethom
+ggsave(metrics_vs_hethom,filename=glue('{output_folder}/metrics_vs_hethom_vs_call.{Sys.Date()}.jpg'),device = 'jpg',height=10,width=10,bg = 'white')
 
+# Plot GQ vs DP
+depth_vs_gq_hist<-
+  comp_vcf_all%>%
+  slice_sample(n=5000000)%>%
+  mutate(gt_AF=as.numeric(gt_AF))%>%
+  filter(gt_BD!='UNK')%>%
+  select(gt_BVT,gt_BD,gt_BLT,features_to_plot)%>%
+  mutate(gt_DP_cat=cut(gt_DP,breaks=seq(0,100,10)),
+         gt_GQ_cat=cut(gt_GQ,breaks=seq(0,100,10)))%>%
+  filter(!is.na(gt_DP_cat)&!is.na(gt_GQ_cat))%>%
+  #pivot_longer(-c(gt_BD,gt_BVT,gt_BLT))%>%
+  ggplot(aes(x=gt_DP,fill=gt_BD))+
+  #geom_point(alpha=0.5)+
+  geom_histogram(alpha=0.7)+facet_wrap(gt_GQ_cat~gt_BD,scales='free_y',nrow = 7)+
+  #geom_density(alpha=0.5)+facet_grid(gt_GQ_cat~.,scales='free')+
+  labs(x='Depth (gt_DP)',y='GQ category')+
+  theme_minimal()+
+  ggsci::scale_fill_nejm()+
+  theme(legend.position = 'top')
+depth_vs_gq_hist
 
+depth_vs_gq_density<-
+  comp_vcf_all%>%
+  slice_sample(n=5000000)%>%
+  mutate(gt_AF=as.numeric(gt_AF))%>%
+  filter(gt_BD!='UNK')%>%
+  select(gt_BVT,gt_BD,gt_BLT,features_to_plot)%>%
+  mutate(gt_DP_cat=cut(gt_DP,breaks=seq(0,100,10)),
+         gt_GQ_cat=cut(gt_GQ,breaks=seq(0,100,10)))%>%
+  filter(!is.na(gt_DP_cat)&!is.na(gt_GQ_cat))%>%
+  #pivot_longer(-c(gt_BD,gt_BVT,gt_BLT))%>%
+  ggplot(aes(x=gt_DP,fill=gt_BD))+
+  #geom_point(alpha=0.5)+
+  #geom_histogram(alpha=0.7)+facet_wrap(gt_GQ_cat~gt_BD,scales='free_y')+
+  geom_density(alpha=0.5)+facet_grid(gt_GQ_cat~.,scales='free')+
+  labs(x='Depth (gt_DP)',y='GQ category')+
+  theme_minimal()+
+  ggsci::scale_fill_nejm()+
+  theme(legend.position = 'top')
+depth_vs_gq_density
+
+library(patchwork)
+
+depth_vs_gq<-depth_vs_gq_hist+depth_vs_gq_density
+ggsave(depth_vs_gq,filename=glue('{output_folder}/depth_vs_gq.{Sys.Date()}.jpg'),device = 'jpg',height=10,width=20,bg = 'white')
 ```
 
 https://rpubs.com/StatsGary/tidymodels_from_scratch
@@ -116,90 +184,96 @@ library(tidymodels)
 set.seed(123)
 features<-c('gt_BVT','QUAL','MQ','gt_DP','gt_GQ','gt_AF')
 strata<-'gt_BD'
-included_BVT<-c('SNP') # either SNP or INDEL or both
+included_BVTs<-list('All'=c('SNP','INDEL'),
+                    'SNP'=c('SNP'),
+                    'INDEL'=c('INDEL')) # either SNP or INDEL or both
 form<-as.formula(glue('{strata} ~ {paste0(features,collapse="+")}'))
 # optional grids
 manual_grid<-expand.grid(cost_complexity=c(0.00001,0.0001,0.001),tree_depth=c(4,5,6))
 regular_grid <- grid_regular(dials::cost_complexity(),
                                dials::tree_depth(),
                                levels = 3)
-sample_size<-500000
+sample_size<-NA # whether you want to sample the complete dataset
+train_prop <- 0.4 # the proportion of train samples out of the total 
+case_level <- 'FP' # what level should be considered the case level
+control_sample_rate<-250 # if this is not NA, then controls will be randomly sampled in a 1:control_sample_rate case:control rate
+
 ############################################################################################################
 ```
 
 ```{r prep_data_for_ml}
-# Prepare the data for ML
-ml_data<-comp_vcf_all%>%
-  filter(gt_BD%in%c('TP','FP'))%>%
-  filter(gt_BVT%in%included_BVT)%>%
-  slice_sample(n=sample_size)%>%
-  mutate(gt_BD=factor(gt_BD),
-         gt_AF=as.numeric(gt_AF),
-         gt_DP=as.numeric(gt_DP),
-         gt_GQ=as.numeric(gt_GQ),
-         gt_QD=as.numeric(QD))
+final_models<-list()
 
-ml_data%>%count(gt_BD,gt_BVT)
-ml_data%>%group_by(gt_BVT,gt_BD)%>%
-  skimr::skim_without_charts(all_of(features))
+for (included_BVT_name in names(included_BVTs)){
+  message(glue('Training model on {included_BVT_name} variant data..'))
+  included_BVT<-included_BVTs[[included_BVT_name]]
+  
+  # Prepare data for ML
+  ml_data<-comp_vcf_all%>%
+    filter(gt_BD%in%c('TP','FP'))%>%
+    filter(gt_BVT%in%included_BVT)%>%
+    mutate(gt_BD=factor(gt_BD),
+           gt_AF=as.numeric(gt_AF),
+           gt_DP=as.numeric(gt_DP),
+           gt_GQ=as.numeric(gt_GQ),
+           gt_QD=as.numeric(QD))
+  
+  if (!is.na(sample_size)){
+    ml_data<-ml_data%>%slice_sample(n=sample_size)
+  }
+  
+  ml_data%>%count(gt_BD,gt_BVT)
+  ml_data%>%group_by(gt_BVT,gt_BD)%>%
+    skimr::skim_without_charts(all_of(features))
+  
+  ml_data<-ml_data[complete.cases(ml_data%>%select(all_of(features))),]
+  
+  # Partition into training and hold out test / validation sample
+  train_test<-split_train_test(ml_data,strata=strata,train_prop = train_prop)
+  train_data <- train_test[['train']]
+  train_data%>%count(!!sym(strata))
+  
+  # if case / control ratio adjustment is required
+  if (!is.na(control_sample_rate)){
+    num_of_cases<-train_data%>%count(!!sym(strata))%>%filter(!!sym(strata)==case_level)%>%pull(n)
+    train_data<-train_data%>%filter(!!sym(strata)==case_level)%>%
+      bind_rows(train_data%>%filter(!!sym(strata)!=case_level)%>%slice_sample(n=num_of_cases*control_sample_rate))
+  }
+  train_data%>%count(!!sym(strata))
+  test_data <- train_test[['test']]
+  test_data%>%count(!!sym(strata))
+  
+  # Set cross validation data
+  vfold <- vfold_cv(train_data, v=5)
+  # set up the recipe
+  rec <- 
+    recipe(form, data=train_data)#%>%
+    #step_smote(gt_BD, over_ratio = 0.3)
+  
+  # Train the model
+  final_models[[included_BVT_name]]<-train_decision_tree(rec,vfold,manual_grid,'roc_auc')
+}
 
-ml_data<-ml_data[complete.cases(ml_data%>%select(all_of(features))),]
+save(final_models,file=glue('{output_folder}/final_models.RData'))
 ```
 
-```{r train_model}
-# Partition into training and hold out test / validation sample
-train_test<-split_train_test(ml_data,strata=strata)
-train_data <- train_test[['train']]
-test_data <- train_test[['test']]
-# Set cross validation data
-vfold <- vfold_cv(train_data, v=5)
-
-# set up the recipe
-rec <- 
-  recipe(form, data=train_data)#%>%
-  #step_smote(gt_BD, over_ratio = 0.3)
-# set up the tuning process
-decision_tree_tuning_setup <- setup_decision_tree_tuning()
-# set up the workflow
-decision_tree_wf <- setup_decision_tree_workflow(recipe = rec,
-                                                 tuning_setup = decision_tree_tuning_setup)
-
-# Evaluate model performance on cross validation using the different tuning parameters
-tuning_res<-train_model_on_tuning_grid(workflow_with_tune = decision_tree_wf,
-                                       vfold = vfold,
-                                       selected_grid = manual_grid)
-
-# collected metrics
-collected_mets <- tune::collect_metrics(tuning_res)
-print(collected_mets)
-
-best_tree <- tuning_res %>% 
-  tune::select_best("roc_auc")
-
-final_decision_tree_wf <- 
-  decision_tree_wf %>% 
-  finalize_workflow(best_tree) #Finalise workflow passes in our best tree
-
-print(final_decision_tree_wf)
-
-final_decision_tree <- 
-  final_decision_tree_wf %>% 
-  fit(data = train_data)
-
-print(final_decision_tree)
-```
 
 ```{r plot_tree}
-tree_fit <- final_decision_tree %>% 
-  extract_fit_parsnip()
-library(rpart.plot)
-rpart.plot(tree_fit$fit,
-           type=1,
-           extra=105)
+for (included_BVT_name in names(included_BVTs)){
+  tree_fit <- final_models[[included_BVT_name]] %>% 
+    extract_fit_parsnip()
+  library(rpart.plot)
+  pdf(file=glue('{output_folder}/{included_BVT_name}_variants_decision_tree.pdf'))
+  rpart.plot(tree_fit$fit,
+             type=1,
+             extra=105)
+  dev.off()
+}
 ```
 
 ```{r evaluate}
 # Predict on holdout set
+tree_fit<-final_models[['All']]
 class_pred <- predict(tree_fit, test_data) #Get the class label predictions
 prob_pred <- predict(tree_fit, test_data, type="prob") #Get the probability predictions
 predictions <- data.frame(class_pred, prob_pred) %>% 
@@ -227,19 +301,27 @@ bin_preds<-function(input_table,conditions,col_name='bin_pred',default='intermed
 }
 
 #tree_conditions<-list(high=c('QUAL>=20','MQ>50','DP>10'),low=c('QUAL<11','DP<10'))
-tree_conditions<-list(high=c('gt_GQ>15'),low=c('gt_GQ<6'))
+tree_conditions<-list(high=c('gt_GQ>10'),low=c('gt_GQ<6'),low=c('gt_GQ<=20','gt_DP>60'))
 test_data_fixed<-bin_preds(test_data_fixed,col_name='tree_based_preds',tree_conditions)
 
 count_data_tree<-test_data_fixed%>%count(tree_based_preds,gt_BD)
-count_data_tree%>%left_join(count_data_tree%>%group_by(tree_based_preds)%>%summarize(total=sum(n)))%>%
+count_data_tree<-count_data_tree%>%left_join(count_data_tree%>%group_by(tree_based_preds)%>%summarize(total=sum(n)))%>%
   mutate(rate=n/total)
+count_data_tree
 
 base_conditions<-list(high=c('QUAL>=20'),low=c('QUAL<10'))
 test_data_fixed<-bin_preds(test_data_fixed,col_name='base_preds',base_conditions)
 
 count_data_base<-test_data_fixed%>%count(base_preds,gt_BD)
-count_data_base%>%left_join(count_data_base%>%group_by(base_preds)%>%summarize(total=sum(n)))%>%
+count_data_base<-count_data_base%>%left_join(count_data_base%>%group_by(base_preds)%>%summarize(total=sum(n)))%>%
   mutate(rate=n/total)
+count_data_base
+
+# join both binned scores
+bin_data<-count_data_tree%>%rename('confidence'=tree_based_preds)%>%mutate(type='tree')%>%
+  bind_rows(count_data_base%>%rename('confidence'=base_preds)%>%mutate(type='basic'))
+  
+write.table(bin_data,file=glue('{output_folder}/all_vars_bins.csv'),row.names = F,quote = F)
 
 test_predictions <- test_data %>% 
   bind_cols(predictions)

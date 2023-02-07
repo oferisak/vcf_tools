@@ -12,12 +12,6 @@ vcf_to_tidy<-function(input_vcfR,happy_individual=NA){
   return(vcf_df)
 }
 
-gt_merge<-gt_df%>%filter(Indiv=='QUERY')%>%select(gt_BD,gt_BLT,gt_BVT)%>%
-  bind_cols(gt_df%>%filter(!Indiv%in%c('QUERY','TRUTH'))%>%select(-c(gt_BD,gt_BLT,gt_BVT)))%>%
-  bind_cols(vcf_tidy$fix%>%select(-c(ChromKey,POS)))
-gt_merge<-gt_merge%>%filter(gt_BLT!='nocall')
-z<-gt_merge%>%filter(is.na(gt_GT))
-
 filter_happy_vcf_by_region<-function(happy_vcf_file_name,regions_of_interest){
   open_file_command <-ifelse(grepl('.gz',happy_vcf_file_name),'gunzip -c','cat')
   regions_query<-paste0(regions_of_interest,collapse='\\|')
