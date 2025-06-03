@@ -44,7 +44,8 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
     }
 
     cat("Found", length(vcf_files), "VCF files\n")
-    cat("FORMAT fields to include:", paste(c(format_fields, "FT"), collapse = ", "), "\n")
+    cat("FORMAT fields to include:", paste(format_fields, collapse = ", "), "\n")
+    cat("Filtering for PASS variants only\n")
 
     # Create output directories
     chunk_dir <- file.path(vcf_folder, "chunks")
@@ -156,7 +157,7 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
         output_file <- file.path(chunk_dir, paste0(base_name, "_", region_name, ".vcf.gz"))
 
         cmd <- paste(
-            "bcftools view -r", shQuote(region), shQuote(vcf_file),
+            "bcftools view -r", shQuote(region), "-f PASS", shQuote(vcf_file),
             "-Oz -o", shQuote(output_file)
         )
 
@@ -225,14 +226,17 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
                 # Index the temporary file
                 system(paste("tabix -p vcf", shQuote(temp_merged)), ignore.stdout = TRUE, ignore.stderr = TRUE)
 
-                # Add FILTER status to FORMAT field, set missing genotypes to reference and filter FORMAT fields
-                format_keep <- paste0("FORMAT/", paste(c(format_fields, "FT"), collapse = ",FORMAT/"))
+                # Set missing genotypes to reference and filter FORMAT fields (only PASS variants)
+                format_keep <- paste0("FORMAT/", paste(format_fields, collapse = ",FORMAT/"))
+
                 cmd2 <- paste(
                     "bcftools +setGT", shQuote(temp_merged), "-- -t . -n 0",
-                    "| bcftools +fill-tags -- -t FORMAT/FT:1=FILTER",
                     "| bcftools annotate --remove", shQuote(paste0("^", format_keep)),
                     "-Oz -o", shQuote(merged_file)
                 )
+
+                result <- system(cmd2, ignore.stdout = TRUE, ignore.stderr = TRUE)
+
                 result <- system(cmd2, ignore.stdout = TRUE, ignore.stderr = TRUE)
 
                 # Clean up temp file
@@ -261,10 +265,11 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
 
             format_keep <- paste0("FORMAT/", paste(c(format_fields, "FT"), collapse = ",FORMAT/"))
 
-            # Process single file with FILTER to FORMAT, missing genotype handling and format filtering
+            # Process single file with missing genotype handling and format filtering (only PASS variants)
+            format_keep <- paste0("FORMAT/", paste(format_fields, collapse = ",FORMAT/"))
+
             cmd <- paste(
                 "bcftools +setGT", shQuote(chunk_files[1]), "-- -t . -n 0",
-                "| bcftools +fill-tags -- -t FORMAT/FT:1=FILTER",
                 "| bcftools annotate --remove", shQuote(paste0("^", format_keep)),
                 "-Oz -o", shQuote(merged_file)
             )
@@ -279,6 +284,8 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
                 unlink(chunk_files[1])
                 unlink(paste0(chunk_files[1], ".tbi"))
             }
+
+            # No temp files to clean up for single file case
         }
 
         setTxtProgressBar(pb, i)
