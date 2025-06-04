@@ -250,6 +250,18 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
                 system(paste("tabix -p vcf", shQuote(merged_file)), ignore.stdout = TRUE, ignore.stderr = TRUE)
                 merged_files <- c(merged_files, merged_file)
 
+                # Post-processing: remove existing INFO fields, fill AC, AN, AF
+                cmd3 <- paste(
+                    "bcftools annotate -x INFO", shQuote(merged_file),
+                    "| bcftools +fill-tags -Oz -o temp.vcf.gz -- -t AC,AN,AF,AC_Hom,AC_Het,AC_Hemi,NS &&",
+                    "mv temp.vcf.gz", shQuote(merged_file)
+                )
+                result <- system(cmd3, ignore.stdout = TRUE, ignore.stderr = TRUE)
+
+                if (result != 0) {
+                    cat("Error post-processing merged file:", merged_file, "\n")
+                }
+
                 # Clean up chunk files for this region
                 for (chunk_file in chunk_files) {
                     unlink(chunk_file)
@@ -280,6 +292,18 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
                 system(paste("tabix -p vcf", shQuote(merged_file)), ignore.stdout = TRUE, ignore.stderr = TRUE)
                 merged_files <- c(merged_files, merged_file)
 
+                # Post-processing: remove existing INFO fields, fill AC, AN, AF
+                cmd3 <- paste(
+                    "bcftools annotate -x INFO", shQuote(merged_file),
+                    "| bcftools +fill-tags -Oz -o temp.vcf.gz -- -t AC,AN,AF,AC_Hom,AC_Het,AC_Hemi,NS &&",
+                    "mv temp.vcf.gz", shQuote(merged_file)
+                )
+                result <- system(cmd3, ignore.stdout = TRUE, ignore.stderr = TRUE)
+
+                if (result != 0) {
+                    cat("Error post-processing merged file:", merged_file, "\n")
+                }
+
                 # Clean up the single chunk file
                 unlink(chunk_files[1])
                 unlink(paste0(chunk_files[1], ".tbi"))
@@ -308,8 +332,8 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
         final_output <- file.path(vcf_folder, "final_merged_all_samples_all_regions.vcf.gz")
 
         # Sort merged files by genomic position
-        sorted_files <- sort(merged_files)
-
+        # sorted_files <- sort(merged_files)
+        sorted_files <- merged_files
         # Create file list
         file_list <- tempfile(fileext = ".txt")
         writeLines(sorted_files, file_list)
