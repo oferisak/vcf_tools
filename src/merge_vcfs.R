@@ -1,16 +1,101 @@
 #!/usr/bin/env Rscript
 
-# VCF Processing Script (Parallelized, with unique temp files)
-# Processes VCF files by chunking, merging, and optionally joining
-# Requires: bcftools, tabix
+# !/usr/bin/env Rscript
+
+################################################################################
+#                         VCF Processing Script                               #
+################################################################################
+#
+# DESCRIPTION:
+#   This script processes multiple VCF (Variant Call Format) files by:
+#   1. Chunking each VCF file into genomic regions
+#   2. Merging chunks across samples for each region
+#   3. Optionally concatenating all regions into a single final file
+#
+#   The script is designed for large-scale genomic data processing with
+#   parallelization support and handles both compressed (.vcf.gz) and
+#   uncompressed (.vcf) files.
+#
+# FEATURES:
+#   - Parallel processing support (configurable number of cores)
+#   - Automatic VCF compression and indexing
+#   - Filters for PASS variants only
+#   - Customizable FORMAT field retention
+#   - Proper genomic coordinate sorting
+#   - Automatic cleanup of intermediate files
+#
+# REQUIREMENTS:
+#   - R packages: parallel
+#   - External tools: bcftools, tabix, bgzip (from htslib/samtools suite)
+#   - Operating System: Linux/Unix/macOS with bash shell
+#
+# INSTALLATION OF DEPENDENCIES:
+#   # Install R (if not already installed)
+#   # On Ubuntu/Debian: sudo apt-get install r-base
+#   # On CentOS/RHEL: sudo yum install R
+#   # On macOS: brew install r
+#
+#   # Install bcftools and related tools
+#   # On Ubuntu/Debian: sudo apt-get install bcftools tabix
+#   # On CentOS/RHEL: sudo yum install bcftools htslib
+#   # On macOS: brew install bcftools htslib
+#
+#   # Or compile from source: http://www.htslib.org/download/
+#
+# USAGE:
+#   Rscript vcf_processor.R <vcf_input> <chunk_size> [join_chunks] [format_fields] [n_cores]
+#
+# PARAMETERS:
+#   vcf_input      : Path to directory containing VCF files (.vcf or .vcf.gz)
+#   output_folder   : Path to directory where output files will be saved
+#   chunk_size      : Size of genomic regions in base pairs (e.g., 1000000 for 1Mb)
+#   join_chunks     : TRUE/FALSE - whether to concatenate all regions (default: FALSE)
+#   format_fields   : Comma-separated FORMAT fields to keep (default: "GT,AD")
+#   n_cores         : Number of CPU cores for parallel processing (default: 1)
+#
+# EXAMPLES:
+#   # Basic usage -  Custom FORMAT fields and parallel processing
+#   Rscript vcf_processor.R /path/to/vcf/files /path/to/output/folder 500000 TRUE "GT,AD,DP,GQ" 4
+
+# OUTPUT:
+#   - chunks/           : Temporary directory with individual region chunks (deleted if empty)
+#   - merged_chunks/    : Directory with merged VCF files per region
+#   - final_merged_all_samples_all_regions.vcf.gz : Final concatenated file (if join_chunks=TRUE)
+#
+# WORKFLOW:
+#   1. Input validation and tool checking
+#   2. VCF file discovery, compression, and indexing
+#   3. Chromosome/contig information extraction
+#   4. Region generation based on chunk size
+#   5. Parallel chunking of each VCF by region (filters PASS variants only)
+#   6. Parallel merging of chunks across samples for each region
+#   7. FORMAT field filtering and INFO field recalculation
+#   8. Optional concatenation of all regions with proper genomic sorting
+#
+# PERFORMANCE NOTES:
+#   - Processing time scales with: number of samples, genome size, variant density
+#   - Memory usage is generally low due to streaming processing
+#   - Disk space needed: ~2-3x input file size for intermediate files
+#   - Recommended chunk sizes: 100kb-10Mb depending on variant density
+#
+# TROUBLESHOOTING:
+#   - "Required tool not found": Install bcftools/tabix/bgzip
+#   - "No VCF files found": Check file extensions (.vcf or .vcf.gz)
+#   - "Permission denied": Ensure write access to output directory
+#   - Out of disk space: Reduce chunk_size or free up space
+#   - Memory issues: Reduce n_cores parameter
 
 library(parallel)
 
-process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE,
+process_vcf_files <- function(vcf_input, output_folder, region_chunk_size, join_chunks = FALSE,
                               format_fields = c("GT", "AD"), n_cores = 1) {
     # Validate inputs
-    if (!dir.exists(vcf_folder)) {
-        stop("VCF folder does not exist: ", vcf_folder)
+    if (dir.exists(vcf_input)) {
+        vcf_files_raw <- list.files(vcf_input, pattern = "\\.vcf(\\.gz)?$", full.names = TRUE)
+    } else if (file.exists(vcf_input)) {
+        vcf_files_raw <- readLines(vcf_input)
+    } else {
+        stop("Input must be a directory or a text file listing VCF paths: ", vcf_input)
     }
     if (!is.numeric(region_chunk_size) || region_chunk_size <= 0) {
         stop("region_chunk_size must be a positive numeric value")
@@ -35,11 +120,13 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
         }
     }
     check_tools()
+    if (!dir.exists(output_folder)) {
+        dir.create(output_folder, recursive = TRUE)
+    }
 
-    # Get VCF files (compressed or not)
-    vcf_files_raw <- list.files(vcf_folder, pattern = "\\.vcf(\\.gz)?$", full.names = TRUE)
+
     if (length(vcf_files_raw) == 0) {
-        stop("No VCF files found in: ", vcf_folder)
+        stop("No VCF files found in: ", vcf_input)
     }
 
     cat("Found", length(vcf_files_raw), "VCF file(s)\n")
@@ -48,8 +135,8 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
     cat("Using", n_cores, "core(s) for parallel steps\n\n")
 
     # Create output directories
-    chunk_dir <- file.path(vcf_folder, "chunks")
-    merged_dir <- file.path(vcf_folder, "merged_chunks")
+    chunk_dir <- file.path(output_folder, "chunks")
+    merged_dir <- file.path(output_folder, "merged_chunks")
     dir.create(chunk_dir, showWarnings = FALSE, recursive = TRUE)
     dir.create(merged_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -328,7 +415,7 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
             cat("... (", length(sorted_files) - length(flines), "more lines) ...\n", sep = "")
         }
 
-        final_output <- file.path(vcf_folder, "final_merged_all_samples_all_regions.vcf.gz")
+        final_output <- file.path(output_folder, "final_merged_all_samples_all_regions.vcf.gz")
         cat("Final output path:", final_output, "\n")
 
         # Build bcftools concat command
@@ -365,7 +452,7 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
     cat("Processing complete!\n")
     cat("Merged region files directory:", merged_dir, "\n")
     if (join_chunks) {
-        final_file <- file.path(vcf_folder, "final_merged_all_samples_all_regions.vcf.gz")
+        final_file <- file.path(output_folder, "final_merged_all_samples_all_regions.vcf.gz")
         if (file.exists(final_file)) {
             cat("Final merged file:", final_file, "\n")
         }
@@ -378,8 +465,9 @@ process_vcf_files <- function(vcf_folder, region_chunk_size, join_chunks = FALSE
 if (!interactive()) {
     args <- commandArgs(trailingOnly = TRUE)
     if (length(args) < 2) {
-        cat("Usage: Rscript merge_vcfs.R <vcf_folder> <region_chunk_size> [join_chunks] [format_fields] [n_cores]\n")
-        cat("  vcf_folder: Path to folder containing VCF files\n")
+        cat("Usage: Rscript merge_vcfs.R <vcf_input> <region_chunk_size> [join_chunks] [format_fields] [n_cores]\n")
+        cat("  vcf_input: Path to folder / text file containing VCF files\n")
+        cat("  output_folder: Path to folder containing VCF files\n")
         cat("  region_chunk_size: Numeric value for chunk size (bp)\n")
         cat("  join_chunks: TRUE/FALSE (optional, default: FALSE)\n")
         cat("  format_fields: Comma-separated FORMAT fields (optional, default: GT,AD)\n")
@@ -387,11 +475,12 @@ if (!interactive()) {
         quit(status = 1)
     }
 
-    vcf_folder <- args[1]
-    region_chunk_size <- as.numeric(args[2])
-    join_chunks <- if (length(args) >= 3) as.logical(args[3]) else FALSE
-    format_fields <- if (length(args) >= 4 && nzchar(args[4])) strsplit(args[4], ",")[[1]] else c("GT", "AD")
-    n_cores <- if (length(args) >= 5) as.integer(args[5]) else 1
+    vcf_input <- args[1]
+    output_folder <- args[2]
+    region_chunk_size <- as.numeric(args[3])
+    join_chunks <- if (length(args) >= 4) as.logical(args[4]) else FALSE
+    format_fields <- if (length(args) >= 5 && nzchar(args[5])) strsplit(args[5], ",")[[1]] else c("GT", "AD")
+    n_cores <- if (length(args) >= 6) as.integer(args[6]) else 1
 
-    process_vcf_files(vcf_folder, region_chunk_size, join_chunks, format_fields, n_cores)
+    process_vcf_files(vcf_input, output_folder, region_chunk_size, join_chunks, format_fields, n_cores)
 }
