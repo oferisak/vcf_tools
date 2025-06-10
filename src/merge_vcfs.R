@@ -86,6 +86,7 @@
 #   - Memory issues: Reduce n_cores parameter
 
 library(parallel)
+library(glue)
 
 process_vcf_files <- function(vcf_input, output_folder, region_chunk_size, join_chunks = FALSE,
                               format_fields = c("GT", "AD"), n_cores = 1) {
@@ -199,6 +200,9 @@ process_vcf_files <- function(vcf_input, output_folder, region_chunk_size, join_
         regions <- character()
         for (i in seq_len(nrow(chrom_info))) {
             chrom <- chrom_info$chrom[i]
+            if (grepl("_|\-", chrom)) {
+                next
+            }
             chrom_length <- chrom_info$length[i]
             if (is.na(chrom_length)) {
                 regions <- c(regions, chrom)
@@ -219,10 +223,7 @@ process_vcf_files <- function(vcf_input, output_folder, region_chunk_size, join_
     regions <- generate_regions(chrom_info, region_chunk_size)
     cat("Generated", length(regions), "region(s) for processing\n\n")
 
-    #
-    # Step 1: Chunk each VCF file (in parallel per region)
-    #
-    cat("Step 1: Chunking VCF files (parallel per region)...\n")
+    # Function to chunk a single VCF file for a specific region
     chunk_vcf <- function(vcf_file, region) {
         base_name <- basename(tools::file_path_sans_ext(tools::file_path_sans_ext(vcf_file)))
         region_name <- gsub("[:-]", "_", region)
@@ -239,28 +240,8 @@ process_vcf_files <- function(vcf_input, output_folder, region_chunk_size, join_
         return(NULL)
     }
 
-    chunk_results <- list()
-    for (region in regions) {
-        cat("  Chunking region:", region, "...\n")
-        region_chunks_raw <- mclapply(
-            vcf_files,
-            function(v) chunk_vcf(v, region),
-            mc.cores = n_cores
-        )
-        region_chunks <- Filter(Negate(is.null), region_chunks_raw)
-        if (length(region_chunks) > 0) {
-            region_chunks <- unlist(region_chunks, use.names = FALSE)
-            chunk_results[[region]] <- region_chunks
-        }
-    }
-    cat("Completed chunking.\n\n")
-
-    #
-    # Step 2: Merge chunks for each region (parallel over regions)
-    #
-    cat("Step 2: Merging chunks by region (parallel)...\n")
-    merge_region <- function(region) {
-        chunk_files <- chunk_results[[region]]
+    # Function to merge chunks for a region
+    merge_region_chunks <- function(chunk_files, region) {
         if (length(chunk_files) == 0) {
             return(NULL)
         }
@@ -316,8 +297,9 @@ process_vcf_files <- function(vcf_input, output_folder, region_chunk_size, join_
 
         system(paste("tabix -p vcf", shQuote(merged_file)), ignore.stdout = TRUE, ignore.stderr = TRUE)
 
-        # === BEGIN FIXED: use a unique tempfile for fill-tags ===
-        temp_fill <- tempfile(fileext = ".vcf.gz")
+        # Post-processing with fill-tags
+        temp_fill <- glue("{merged_file}.tmp.vcf.gz")
+        # temp_fill <- tempfile(fileext = ".vcf.gz")
         cmd3 <- paste(
             "bcftools annotate -x INFO", shQuote(merged_file),
             "| bcftools +fill-tags -Oz -o", shQuote(temp_fill),
@@ -330,26 +312,97 @@ process_vcf_files <- function(vcf_input, output_folder, region_chunk_size, join_
             # Overwrite merged_file with the new one
             file.rename(temp_fill, merged_file)
         }
-        # ============================================================
-
-        for (cf in chunk_files) {
-            unlink(cf)
-            unlink(paste0(cf, ".tbi"))
-        }
 
         return(merged_file)
     }
 
-    merged_results <- mclapply(names(chunk_results), merge_region, mc.cores = n_cores)
-    merged_files <- unlist(merged_results, use.names = FALSE)
-    cat("Completed merging. Created", length(merged_files), "merged region file(s).\n\n")
-
-    # Clean up chunk directory if empty
-    if (length(list.files(chunk_dir, recursive = TRUE)) == 0) {
-        unlink(chunk_dir, recursive = TRUE)
-        cat("Cleaned up chunk directory\n\n")
+    # Function to clean up chunk files
+    cleanup_chunks <- function(chunk_files) {
+        for (cf in chunk_files) {
+            if (!is.null(cf) && file.exists(cf)) {
+                unlink(cf)
+                unlink(paste0(cf, ".tbi"))
+            }
+        }
     }
 
+    #
+    # Main processing loop: Process regions in batches
+    #
+    cat("Processing regions in batches of", n_cores, "...\n")
+
+    # Split regions into batches of n_cores
+    region_batches <- split(regions, ceiling(seq_along(regions) / n_cores))
+    merged_files <- character(0)
+
+    for (batch_idx in seq_along(region_batches)) {
+        current_regions <- region_batches[[batch_idx]]
+        cat(
+            "Processing batch", batch_idx, "of", length(region_batches),
+            "(", length(current_regions), "regions)...\n"
+        )
+
+        # Step 1: Chunk VCF files for current batch of regions (parallel)
+        cat("  Chunking regions in parallel...\n")
+        batch_chunk_results <- list()
+
+        for (region in current_regions) {
+            cat("    Chunking region:", region, "...\n")
+            region_chunks_raw <- mclapply(
+                vcf_files,
+                function(v) chunk_vcf(v, region),
+                mc.cores = n_cores
+            )
+            region_chunks <- Filter(Negate(is.null), region_chunks_raw)
+            if (length(region_chunks) > 0) {
+                region_chunks <- unlist(region_chunks, use.names = FALSE)
+                batch_chunk_results[[region]] <- region_chunks
+            }
+        }
+
+        cat("  Merging chunks for batch regions in parallel...\n")
+
+        # Wrapper function for parallel merging that includes cleanup
+        merge_and_cleanup <- function(region) {
+            chunk_files <- batch_chunk_results[[region]]
+            cat("    Merging region:", region, "...\n")
+
+            merged_file <- merge_region_chunks(chunk_files, region)
+            if (!is.null(merged_file)) {
+                cat("    Successfully merged region:", region, "\n")
+            } else {
+                cat("    Warning: Failed to merge region:", region, "\n")
+            }
+
+            # Clean up chunk files immediately after merging
+            cleanup_chunks(chunk_files)
+
+            return(merged_file)
+        }
+
+        # Run merging in parallel across regions in the current batch
+        batch_merged_results <- mclapply(
+            names(batch_chunk_results),
+            merge_and_cleanup,
+            mc.cores = n_cores
+        )
+
+        # Collect successful merges
+        batch_merged_files <- Filter(Negate(is.null), batch_merged_results)
+        if (length(batch_merged_files) > 0) {
+            merged_files <- c(merged_files, unlist(batch_merged_files, use.names = FALSE))
+        }
+
+        cat("  Completed batch", batch_idx, "\n\n")
+    }
+
+    cat("Processing complete. Created", length(merged_files), "merged region file(s).\n")
+
+    # Clean up chunk directory if empty
+    if (dir.exists(chunk_dir) && length(list.files(chunk_dir, recursive = TRUE)) == 0) {
+        unlink(chunk_dir, recursive = TRUE)
+        cat("Cleaned up chunk directory\n")
+    }
     #
     # Step 3: Join all merged chunks if requested (with improved sorting)
     #
