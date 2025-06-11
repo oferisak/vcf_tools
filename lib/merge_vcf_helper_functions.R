@@ -1,10 +1,13 @@
 # Get chromosomes and their lengths from the first VCF file
 get_chromosomes <- function(vcf_file) {
     cmd <- paste("bcftools view -h", shQuote(vcf_file), "| grep '^##contig'")
+    message("\n=== Running commands to get chromosomes and lengths")
+    message(cmd)
     contig_lines <- system(cmd, intern = TRUE)
     if (length(contig_lines) == 0) {
         # Fallback: query unique chromosomes in data
         cmd2 <- paste("bcftools query -f '%CHROM\\n'", shQuote(vcf_file), "| sort -u")
+        message(cmd2)
         chroms <- system(cmd2, intern = TRUE)
         return(data.frame(chrom = chroms, length = NA, stringsAsFactors = FALSE))
     }
@@ -75,6 +78,7 @@ chunk_vcf <- function(vcf_file, region, chunk_dir) {
         "bcftools view -r", shQuote(region), "-f PASS", shQuote(vcf_file),
         "-Oz -o", shQuote(output_file)
     )
+    message(cmd)
     res <- system(cmd, ignore.stdout = TRUE, ignore.stderr = TRUE)
     if (res == 0 && file.exists(output_file) && file.size(output_file) > 0) {
         system(paste("tabix -p vcf", shQuote(output_file)), ignore.stdout = TRUE, ignore.stderr = TRUE)
@@ -93,11 +97,13 @@ merge_region_chunks <- function(chunk_files, region, merged_dir) {
     merged_file <- file.path(merged_dir, paste0("merged_", region_name, ".vcf.gz"))
 
     if (length(chunk_files) > 1) {
-        file_list <- tempfile(fileext = ".txt")
+        file_list <- glue("{merged_dir}/{region_name}_chunks_file_list.txt")
+        # file_list <- tempfile(fileext = ".txt")
         writeLines(chunk_files, file_list)
 
         temp_merged <- tempfile(fileext = ".vcf.gz")
         cmd1 <- paste("bcftools merge -l", shQuote(file_list), "-Oz -o", shQuote(temp_merged))
+        message(cmd1)
         res1 <- system(cmd1, ignore.stdout = TRUE, ignore.stderr = TRUE)
 
         if (res1 == 0 && file.exists(temp_merged)) {
@@ -109,21 +115,20 @@ merge_region_chunks <- function(chunk_files, region, merged_dir) {
                 "| bcftools annotate --remove", shQuote(paste0("^", format_keep)),
                 "-Oz -o", shQuote(merged_file)
             )
+            message(cmd2)
             res2 <- system(cmd2, ignore.stdout = TRUE, ignore.stderr = TRUE)
 
             unlink(temp_merged)
             unlink(paste0(temp_merged, ".tbi"))
 
             if (res2 != 0 || !file.exists(merged_file) || file.size(merged_file) == 0) {
-                unlink(file_list)
+                message(glue("Error: Normalizing GT for region {region_name} failed."))
                 return(NULL)
             }
         } else {
-            unlink(file_list)
+            message(glue("Error: Merging chunks for region {region_name} failed."))
             return(NULL)
         }
-
-        unlink(file_list)
     } else {
         single_chunk <- chunk_files[[1]]
         format_keep <- paste0("FORMAT/", paste(format_fields, collapse = ",FORMAT/"))
@@ -132,6 +137,8 @@ merge_region_chunks <- function(chunk_files, region, merged_dir) {
             "| bcftools annotate --remove", shQuote(paste0("^", format_keep)),
             "-Oz -o", shQuote(merged_file)
         )
+        message(cmd_single)
+        # Run the command and check for success
         res_single <- system(cmd_single, ignore.stdout = TRUE, ignore.stderr = TRUE)
         if (res_single != 0 || !file.exists(merged_file) || file.size(merged_file) == 0) {
             return(NULL)
@@ -148,6 +155,7 @@ merge_region_chunks <- function(chunk_files, region, merged_dir) {
         "| bcftools +fill-tags -Oz -o", shQuote(temp_fill),
         "-- -t AC,AN,AF,AC_Hom,AC_Het,AC_Hemi,NS"
     )
+    message(cmd3)
     res3 <- system(cmd3, ignore.stdout = TRUE, ignore.stderr = TRUE)
     if (res3 != 0 || !file.exists(temp_fill) || file.size(temp_fill) == 0) {
         cat("Warning: Post-processing (fill-tags) failed for", merged_file, "\n")
@@ -199,4 +207,52 @@ parse_region_order <- function(filepath) {
     start_pos <- suppressWarnings(as.numeric(strsplit(pos, "-")[[1]][1]))
     if (is.na(start_pos)) start_pos <- Inf
     return(c(contig_order, start_pos))
+}
+
+merge_vcf_files <- function(vcf_files_to_merge, output_dir = ".") {
+    temp_merged <- tempfile(fileext = ".vcf.gz")
+    temp_withgt <- tempfile(fileext = ".vcf.gz")
+    cmd1 <- paste("bcftools merge -l", shQuote(vcf_files_to_merge), "-Oz -o", shQuote(temp_merged))
+    message("\n=== Running commands to merge VCF files and normalize GT:")
+    message(cmd1)
+    res1 <- system(cmd1, ignore.stdout = TRUE, ignore.stderr = FALSE)
+
+    if (res1 == 0 && file.exists(temp_merged)) {
+        system(paste("tabix -p vcf", shQuote(temp_merged)), ignore.stdout = TRUE, ignore.stderr = FALSE)
+
+        cmd2 <- paste(
+            "bcftools +setGT", shQuote(temp_merged), "-- -t . -n 0",
+            "| bcftools view",
+            "-Oz -o", shQuote(temp_withgt)
+        )
+        message(cmd2)
+        res2 <- system(cmd2, ignore.stdout = TRUE, ignore.stderr = FALSE)
+
+        unlink(temp_merged)
+        unlink(paste0(temp_merged, ".tbi"))
+
+        if (res2 != 0 || !file.exists(temp_withgt) || file.size(temp_withgt) == 0) {
+            stop("Error: Adding GT to merged VCF file failed.")
+            return(NULL)
+        }
+    } else {
+        stop("Error: Merging final batch VCF files failed.")
+        return(NULL)
+    }
+
+    system(paste("tabix -p vcf", shQuote(temp_withgt)), ignore.stdout = TRUE, ignore.stderr = FALSE)
+
+    # Post-processing with fill-tags
+    final_merged <- glue("{output_dir}/final_merged.vcf.gz")
+    # temp_fill <- tempfile(fileext = ".vcf.gz")
+    cmd3 <- paste(
+        "bcftools annotate -x INFO", shQuote(temp_withgt),
+        "| bcftools +fill-tags -Oz -o", shQuote(final_merged),
+        "-- -t AC,AN,AF,AC_Hom,AC_Het,AC_Hemi,NS"
+    )
+    message(cmd3)
+    res3 <- system(cmd3, ignore.stdout = TRUE, ignore.stderr = FALSE)
+    if (res3 != 0 || !file.exists(final_merged) || file.size(final_merged) == 0) {
+        cat("Warning: Post-processing (fill-tags) failed for", final_merged, "\n")
+    }
 }
