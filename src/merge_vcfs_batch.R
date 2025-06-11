@@ -91,6 +91,8 @@ if (!only_merge_final) {
         message("++++++++++++++++++++++++++++++++++++++++++++++")
         merge_vcfs_command <- glue("./merge_vcfs.R {batch_file} {output_dir} {chunk_size} {join_chunks} {fields} {n_cores} batch_{i}")
         system(merge_vcfs_command)
+        write("===== Full batch analysis command (run this to retry running the batch) =====", file = glue("{output_dir}/batch_{i}_commands.log"), append = TRUE)
+        write(merge_vcfs_command, file = glue("{output_dir}/batch_{i}_commands.log"), append = TRUE)
     }
 }
 

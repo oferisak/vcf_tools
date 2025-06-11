@@ -83,8 +83,10 @@ chunk_vcf <- function(vcf_file, region, chunk_dir) {
     if (res == 0 && file.exists(output_file) && file.size(output_file) > 0) {
         system(paste("tabix -p vcf", shQuote(output_file)), ignore.stdout = TRUE, ignore.stderr = TRUE)
         return(output_file)
+    } else {
+        stop(glue("Error: failed to chunk region {region} in file {vcf_file}"))
+        return(NULL)
     }
-    return(NULL)
 }
 
 # Function to merge chunks for a region
