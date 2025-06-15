@@ -89,7 +89,7 @@ if (!only_merge_final) {
         message("++++++++++++++++++++++++++++++++++++++++++++++")
         message(sprintf("Running on batch file: %s", batch_file))
         message("++++++++++++++++++++++++++++++++++++++++++++++")
-        merge_vcfs_command <- glue("./merge_vcfs.R {batch_file} {output_dir} {chunk_size} {join_chunks} {fields} {n_cores} batch_{i}")
+        merge_vcfs_command <- glue("./merge_vcfs.R {batch_file} {output_dir}/batch_{i} {chunk_size} {join_chunks} {fields} {n_cores} batch_{i}")
         system(merge_vcfs_command)
         write("===== Full batch analysis command (run this to retry running the batch) =====", file = glue("{output_dir}/batch_{i}_commands.log"), append = TRUE)
         write(merge_vcfs_command, file = glue("{output_dir}/batch_{i}_commands.log"), append = TRUE)
@@ -97,7 +97,7 @@ if (!only_merge_final) {
 }
 
 # merge final batch files
-final_batch_files <- list.files(glue("{output_dir}"), full.names = TRUE, pattern = "batch_\\d+_final_merged.+\\.vcf\\.gz$")
+final_batch_files <- list.files(glue("{output_dir}"), full.names = TRUE, pattern = "batch_\\d+_final_merged.+\\.vcf\\.gz$", recursive = TRUE)
 final_batch_files_list <- glue("{output_dir}/final_batch_files.txt")
 writeLines(final_batch_files, file.path(final_batch_files_list))
 merge_vcf_files(final_batch_files_list, output_dir)
